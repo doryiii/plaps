@@ -1,0 +1,49 @@
+# plaps configuration — every key from the design's Configuration section.
+# Required keys are marked "no default — required"; the service refuses to
+# start without them. Copy to /etc/plaps/plaps.toml and edit.
+
+# The library on disk: indexed in place, never modified. REQUIRED.
+library_root = "/mnt/photos"
+
+# REQUIRED — a UTC-defaulted server silently mis-sorts the whole library.
+# An IANA name; the mtime fallback converts epoch → local wall-clock with it.
+timezone = "Europe/Berlin"
+
+[embedding]
+# REQUIRED — the llama.cpp server on the AI box. Scheme must be http or https.
+base_url = "http://aibox:8095"
+# REQUIRED — the model the endpoint serves; config is the single source of
+# truth, and the adapter verifies the endpoint against it at probe time.
+model_id = "embeddinggemma-2"
+# Cosine similarity floor: results at or above it are matches. Calibrated for
+# EmbeddingGemma 2 (spike: matches 0.62–0.75, runner-ups 0.53–0.68) —
+# re-judge at every model change.
+min_score = 0.70
+# When fewer photos reach min_score, the result list tops up with the
+# next-closest photos anyway — a wrong floor never hides the library.
+min_matches = 10
+
+# -- defaulted when unset -------------------------------------------------
+
+# FHS homes; the dedicated service user must be able to write both.
+# database_path = "/var/lib/plaps/plaps.db"
+# cache_dir = "/var/cache/plaps"
+
+# Defaults to the database file's parent directory + "/backups".
+# backup_dir = "/var/lib/plaps/backups"
+
+[scanner]
+# Seconds between passes; the loop backs off ×2 (to 10 min) when idle.
+poll_interval = 30
+# Seconds between full stat sweeps (bounds in-place-edit blindness to a day).
+full_sweep_interval = 86400
+# Seconds between re-hash passes (bounds mtime-preserving-copy blindness to a
+# month; cost: a full library read).
+rehash_interval = 2592000
+# Percent of the previous pass's live count; unre-linked vanishes beyond it
+# halt tombstone writes until POST /api/admin/guard/resume. 0 disables.
+guard_threshold = 10
+
+[tombstone]
+# Days a vanish stays revivable before purge.
+purge_after_days = 30
