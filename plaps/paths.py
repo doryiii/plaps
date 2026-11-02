@@ -51,15 +51,20 @@ def encode_folder_id(rel_path: str) -> str:
 
 
 def decode_folder_id(folder_id: str) -> str | None:
-    """Inverse of encode_folder_id; None when the id is malformed."""
+    """Inverse of encode_folder_id; None when the id is malformed.
+
+    Decoding validates strictly: base64 would otherwise silently drop invalid
+    characters, turning garbage like '!!!' into the root."""
     if folder_id == ROOT_ID:
         return ""
+    if not folder_id:
+        return None
     try:
         padding = "=" * (-len(folder_id) % 4)
-        decoded = base64.urlsafe_b64decode(folder_id + padding).decode()
+        decoded = base64.b64decode(folder_id + padding, altchars=b"-_", validate=True).decode()
     except (ValueError, UnicodeDecodeError):
         return None
-    if PurePosixPath(decoded).is_absolute() or decoded != decoded.strip("/"):
+    if not decoded or PurePosixPath(decoded).is_absolute() or decoded != decoded.strip("/"):
         return None
     return decoded
 

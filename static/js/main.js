@@ -7,6 +7,7 @@ import { Timeline } from "./timeline.js";
 import { StatusBanner } from "./status.js";
 import { showViewer } from "./viewer.js";
 import { showFolders } from "./folders.js";
+import { showSearch } from "./search.js";
 
 const view = document.getElementById("view");
 const bannerElement = document.getElementById("banner");
@@ -42,10 +43,21 @@ dateJump.addEventListener("change", () => {
   if (dateJump.value) timeline.jumpTo(dateJump.value);
 });
 
+document.getElementById("topbar-search").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = event.target.elements.q;
+  if (input.value.trim()) location.hash = `#/search?q=${encodeURIComponent(input.value)}`;
+});
+
 async function route() {
   const hash = location.hash || "#/";
   if (hash.startsWith("#/photo/")) {
     await showViewer(view, hash.slice("#/photo/".length), timeline.cards);
+    return;
+  }
+  if (hash.startsWith("#/search")) {
+    const params = new URLSearchParams(hash.slice("#/search".length).replace(/^\?/, ""));
+    await showSearch(view, params);
     return;
   }
   if (hash.startsWith("#/folders")) {

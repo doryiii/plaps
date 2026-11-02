@@ -154,3 +154,137 @@ def test_run_forever_processes_until_stop(harness, library):
     harness.worker.stop()
     thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def test_endpoint_outage_trips_circuit_and_never_fails_jobs(harness, library):
+    from plaps.embed.adapter import EndpointUnreachable
+
+    library.add("outage.jpg")
+    harness.scan()
+    harness.adapter.fail_images_with = EndpointUnreachable("ai box down")
+    harness.drain()
+
+    # thumbnails kept flowing: the thumb job completed
+    row = (
+        harness.db.reader()
+        .execute("SELECT thumbnailed_at, embedded_at FROM photos WHERE path='outage.jpg'")
+        .fetchone()
+    )
+    assert row["thumbnailed_at"] is not None
+    # the embed job survived the outage untouched: pending, no attempts charged
+    job = harness.db.reader().execute("SELECT * FROM jobs WHERE kind='embed'").fetchone()
+    assert job["state"] == "pending"
+    assert job["attempts"] == 0
+    # and the circuit is open, so run_once has nothing embed-shaped to do
+    assert harness.worker._embed_backoff_until > time.time()
+
+    # the box returns: the circuit closes and the queue resumes untouched
+    harness.adapter.fail_images_with = None
+    harness.worker._embed_backoff_until = 0.0  # wait out the backoff instantly
+    harness.drain()
+    row = harness.db.reader().execute("SELECT embedded_at FROM photos WHERE path='outage.jpg'").fetchone()
+    assert row["embedded_at"] is not None
+    assert harness.worker._embed_backoff_until == 0.0  # reset on success
+    assert float(harness.db.get_meta("last_embed_success", 0)) > 0
+
+
+def test_circuit_backoff_doubles_and_caps(harness, monkeypatch):
+    clock = 1000.0
+    monkeypatch.setattr("plaps.worker.now", lambda: clock)
+    delays = []
+    for _ in range(9):
+        harness.worker._trip_embed_circuit("test trip")
+        delays.append(harness.worker._embed_backoff_until - clock)
+    # the schedule: 5 s, 10 s, 20 s, 40 s, 80 s, 160 s, then capped at 5 min
+    assert delays[:6] == [5, 10, 20, 40, 80, 160]
+    assert delays[6:] == [config.EMBED_CIRCUIT_CAP] * 3
+
+
+def test_wrong_model_is_circuit_not_failed_perm(harness, library):
+    from plaps.embed.adapter import ModelMismatch
+
+    library.add("wm.jpg")
+    harness.scan()
+    harness.adapter.fail_images_with = ModelMismatch("serves the old model")
+    for _ in range(10):  # far beyond the per-file attempt cap
+        harness.worker.run_once()
+        harness.worker._embed_backoff_until = 0.0  # force the next attempt due
+    job = harness.db.reader().execute("SELECT * FROM jobs WHERE kind='embed'").fetchone()
+    assert job["state"] == "pending"  # an outage never manufactures failed_perm
+    assert job["attempts"] == 0
+    harness.adapter.fail_images_with = None
+
+
+def test_rejected_item_gets_per_file_retry_then_failed_perm(harness, library):
+    from plaps.embed.adapter import ItemRejected
+
+    library.add("broken.jpg")
+    harness.scan()
+    harness.adapter.fail_images_with = ItemRejected("endpoint rejected the request")
+    harness.drain()  # the batch fails, the serial fallback attributes per item
+    job = harness.db.reader().execute("SELECT * FROM jobs WHERE kind='embed'").fetchone()
+    assert job["state"] == "pending"
+    assert job["attempts"] == 1
+    assert harness.worker._embed_backoff_until == 0.0  # per-file, not the circuit
+
+    for expected in (2, 3, 4):
+        with harness.db.writer() as conn:
+            conn.execute("UPDATE jobs SET next_attempt_at=0 WHERE job_id=?", (job["job_id"],))
+        harness.drain()
+        job = harness.db.reader().execute("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],)).fetchone()
+        assert job["attempts"] == expected
+    with harness.db.writer() as conn:
+        conn.execute("UPDATE jobs SET next_attempt_at=0 WHERE job_id=?", (job["job_id"],))
+    harness.drain()
+    job = harness.db.reader().execute("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],)).fetchone()
+    assert job["state"] == "failed_perm"  # after 5 attempts
+    photo = harness.db.reader().execute("SELECT embed_error FROM photos WHERE path='broken.jpg'").fetchone()
+    assert photo["embed_error"] is not None
+
+
+def test_partial_batch_failure_attributes_per_item(harness, library):
+    from plaps.embed.adapter import ItemRejected
+
+    for i in range(2):
+        library.add(f"pair{i}.jpg", content=jpeg_bytes(width=20 + i, height=20))
+    harness.scan()
+    original = harness.adapter.embed_images
+
+    def embed_images(images):
+        if len(images) > 1:
+            raise ItemRejected("batch rejected")
+        if images == [(harness.settings.library_root / "pair1.jpg").read_bytes()]:
+            raise ItemRejected("this one is broken")
+        return original(images)
+
+    harness.adapter.embed_images = embed_images
+    harness.drain()
+    ok_row = harness.db.reader().execute("SELECT embedded_at FROM photos WHERE path='pair0.jpg'").fetchone()
+    bad_job = (
+        harness.db.reader()
+        .execute(
+            "SELECT * FROM jobs j JOIN photos p ON p.photo_id = j.photo_id "
+            "WHERE p.path='pair1.jpg' AND j.kind='embed'"
+        )
+        .fetchone()
+    )
+    assert ok_row["embedded_at"] is not None  # the good item was written
+    assert bad_job["attempts"] == 1  # the bad item was attributed, alone
+    harness.adapter.embed_images = original
+
+
+def test_startup_reembed_queue_does_not_stack(make_harness, library):
+    from plaps.app import startup_model_check
+
+    library.add("once.jpg")
+    harness = make_harness()
+    harness.scan()
+    harness.db.set_meta("active_model_id", "old-model")
+    for _ in range(3):  # restarts with a changed model: never stack duplicates
+        startup_model_check(harness.db, harness.settings)
+    pending = (
+        harness.db.reader()
+        .execute("SELECT COUNT(*) FROM jobs WHERE kind='embed' AND state='pending'")
+        .fetchone()[0]
+    )
+    assert pending == 1  # deduplicated by the pending-jobs unique index

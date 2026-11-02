@@ -37,7 +37,7 @@ def decode_cursor(cursor: str) -> tuple[str, int] | None:
         return None
 
 
-def _date_bounds() -> tuple[str | None, str | None]:
+def date_bounds() -> tuple[str | None, str | None]:
     """Day-inclusive after/before as a half-open raw-string range — no function
     wraps the indexed column."""
     after = request.args.get("after")
@@ -78,7 +78,7 @@ def fetch_window(db, extra_clauses: list[str], extra_params: list, order: str, l
         anchor = decode_cursor(cursor)
         if anchor is None:
             return {"error": ("bad_request", "malformed cursor")}
-    low, high = _date_bounds()
+    low, high = date_bounds()
     if low == "invalid" or high == "invalid":
         return {"error": ("bad_request", "after/before must be ISO dates")}
 

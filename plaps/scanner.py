@@ -273,7 +273,7 @@ class Scanner:
     # -- dispositions ------------------------------------------------------
 
     @staticmethod
-    def _enqueue_jobs(conn, photo_id: int, kinds=("thumb",)) -> None:
+    def _enqueue_jobs(conn, photo_id: int, kinds=("thumb", "embed")) -> None:
         stamp = now()
         for kind in kinds:
             conn.execute(

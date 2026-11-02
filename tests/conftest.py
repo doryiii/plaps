@@ -8,15 +8,18 @@ import io
 import os
 from pathlib import Path
 
+import numpy as np
 import piexif
 import pytest
 import pyvips
 
 from plaps import config as plaps_config
 from plaps.api import create_app
+from plaps.app import startup_model_check
 from plaps.db import Database
 from plaps.images import ImageCache
 from plaps.scanner import Scanner
+from plaps.search import VectorIndex
 from plaps.worker import Worker
 
 pyvips.cache_set_max(0)
@@ -108,17 +111,82 @@ def make_config(tmp_path: Path, library: Path, **overrides) -> plaps_config.Sett
     return plaps_config.load_config(cfg)
 
 
+class FakeAdapter:
+    """The fake embedding adapter: injectable vectors for deterministic
+    ranking, error injection, and a configurable probe result."""
+
+    def __init__(self, model_id: str = "test-model"):
+        self.model_id = model_id
+        self.image_vectors: dict[bytes, object] = {}
+        self.text_vectors: dict[str, object] = {}
+        self.default_image_vector = [1.0] + [0.0] * 7
+        self.default_text_vector = [1.0] + [0.0] * 7
+        self.probe_result = {
+            "reachable": True,
+            "served_model": model_id,
+            "matches": True,
+        }
+        self.fail_images_with = None  # exception instance raised per call
+        self.fail_text_with = None
+        self.calls = {"images": 0, "text": 0, "probe": 0}
+
+    @staticmethod
+    def _unit(vector) -> np.ndarray:
+        array = np.asarray(vector, dtype=np.float32)
+        norm = float(np.linalg.norm(array))
+        return array / norm if norm > 0 else array
+
+    def register_image(self, data: bytes, vector) -> None:
+        self.image_vectors[data] = vector
+
+    def register_text(self, text: str, vector) -> None:
+        self.text_vectors[text] = vector
+
+    def probe(self, force: bool = False) -> dict:
+        self.calls["probe"] += 1
+        return dict(self.probe_result)
+
+    def embed_images(self, images: list[bytes]) -> list:
+        self.calls["images"] += 1
+        if self.fail_images_with is not None:
+            raise self.fail_images_with
+        return [self._unit(self.image_vectors.get(image, self.default_image_vector)) for image in images]
+
+    def embed_text(self, text: str):
+        self.calls["text"] += 1
+        if self.fail_text_with is not None:
+            raise self.fail_text_with
+        return self._unit(self.text_vectors.get(text, self.default_text_vector))
+
+
 class PlapsHarness:
-    """Database + scanner + worker + cache + in-process test client."""
+    """Database + index + scanner + worker + cache + in-process test client."""
 
     def __init__(self, settings: plaps_config.Settings):
         self.settings = settings
         self.db = Database(settings.database_path)
         self.cache = ImageCache(self.db, settings.cache_dir)
         self.cache.init_counter()
-        self.scanner = Scanner(settings, self.db, cache=self.cache)
-        self.worker = Worker(self.db, self.cache, settings.library_root)
-        self.app = create_app(self.db, settings, self.cache, self.scanner, self.worker)
+        self.adapter = FakeAdapter(settings.embedding.model_id)
+        self.index = VectorIndex(self.db, settings, self.adapter)
+        self.scanner = Scanner(settings, self.db, cache=self.cache, index=self.index)
+        self.worker = Worker(
+            self.db,
+            self.cache,
+            settings.library_root,
+            adapter=self.adapter,
+            index=self.index,
+        )
+        startup_model_check(self.db, settings)
+        self.app = create_app(
+            self.db,
+            settings,
+            self.cache,
+            self.scanner,
+            self.worker,
+            self.adapter,
+            self.index,
+        )
         self.client = self.app.test_client()
 
     def scan(self, mode: str | None = None) -> dict:
@@ -170,4 +238,11 @@ def set_mtime_ns(path: Path, mtime_ns: int) -> None:
     os.utime(path, ns=(atime, mtime_ns))
 
 
-__all__ = ["Library", "PlapsHarness", "jpeg_bytes", "make_config", "set_mtime_ns"]
+__all__ = [
+    "FakeAdapter",
+    "Library",
+    "PlapsHarness",
+    "jpeg_bytes",
+    "make_config",
+    "set_mtime_ns",
+]

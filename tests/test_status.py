@@ -19,13 +19,33 @@ def test_status_shape(harness, library):
     library.add("a.jpg")
     harness.scan()
     info = status(harness)
-    assert set(info) == {"scan", "queue", "errors", "ignored_files", "cache", "guard"}
+    assert set(info) == {
+        "scan",
+        "queue",
+        "errors",
+        "ignored_files",
+        "cache",
+        "guard",
+        "model",
+        "adapter",
+    }
     assert info["scan"]["stats"]["added"] == 1
     assert info["scan"]["checkpoint"]["phase"] == "phase2"
     assert info["queue"]["thumb"]["pending"] == 1
     assert info["errors"] == {"exif": 0, "thumb": 0, "embed": 0}
     assert info["ignored_files"] == 0
     assert info["guard"]["tripped"] is False
+    # the model block: steady state, coverage from vectors not embedded_at
+    assert info["model"] == {
+        "active_model_id": "test-model",
+        "configured_model_id": "test-model",
+        "change_in_progress": False,
+        "reembed_coverage": {"embedded": 0, "total": 1},
+    }
+    # the adapter probe: the served-model check doubles as the reachability probe
+    assert info["adapter"]["reachable"] is True
+    assert info["adapter"]["matches"] is True
+    assert info["adapter"]["circuit"] == "closed"
 
 
 def test_ignored_files_counted(harness, library):
@@ -119,3 +139,52 @@ def test_backup_writes_timestamped_snapshot(tmp_path, library, harness):
     time.sleep(1.1)  # the timestamp has second granularity
     second = harness.db.backup(harness.settings.backup_dir)
     assert second != target and second.exists() and target.exists()
+
+
+def test_reembed_coverage_and_cutover_lifecycle(harness, library):
+    from conftest import jpeg_bytes
+
+    content = jpeg_bytes(width=32, height=32, exif_date="2021:01:01 00:00:00")
+    harness.adapter.register_image(content, [1.0, 0.0])
+    library.add("a.jpg", content=content)
+    harness.scan()
+    harness.drain()
+    info = status(harness)
+    assert info["model"]["reembed_coverage"] == {"embedded": 1, "total": 1}
+    assert float(info["adapter"]["last_embed_success"]) > 0
+
+    # a model change begins (the owner restarted with a new configured model)
+    harness.db.set_meta("active_model_id", "old-model")
+    info = status(harness)
+    assert info["model"]["change_in_progress"] is True
+
+    # cutover confirms it and frees the old vectors
+    response = harness.client.post("/api/admin/model/cutover")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["active_model_id"] == "test-model"
+    assert body["deleted_model_ids"] == ["old-model"]
+    models = {row["model_id"] for row in harness.db.reader().execute("SELECT DISTINCT model_id FROM vectors")}
+    assert models == {"test-model"}
+    assert status(harness)["model"]["change_in_progress"] is False
+    # and with no change in progress, cutover is a conflict
+    assert harness.client.post("/api/admin/model/cutover").status_code == 409
+
+
+def test_adapter_probe_state_surfaced(harness, library):
+    harness.adapter.probe_result = {
+        "reachable": False,
+        "served_model": None,
+        "matches": False,
+    }
+    info = status(harness)
+    assert info["adapter"]["reachable"] is False
+    assert info["adapter"]["matches"] is False
+    harness.adapter.probe_result = {
+        "reachable": True,
+        "served_model": "something-else",
+        "matches": False,
+    }
+    info = status(harness)
+    assert info["adapter"]["served_model"] == "something-else"
+    assert info["adapter"]["matches"] is False  # surfaced, not silent
