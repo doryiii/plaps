@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.egg-info/
+*.db
+*.db-wal
+*.db-shm
+cache/
+backups/
