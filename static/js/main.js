@@ -6,6 +6,7 @@ import { getSettings, saveSettings } from "./api.js";
 import { Timeline } from "./timeline.js";
 import { StatusBanner } from "./status.js";
 import { showViewer } from "./viewer.js";
+import { showFolders } from "./folders.js";
 
 const view = document.getElementById("view");
 const bannerElement = document.getElementById("banner");
@@ -47,9 +48,30 @@ async function route() {
     await showViewer(view, hash.slice("#/photo/".length), timeline.cards);
     return;
   }
+  if (hash.startsWith("#/folders")) {
+    await showFolders(view);
+    return;
+  }
+  if (hash.startsWith("#/folder/")) {
+    const folderId = hash.slice("#/folder/".length);
+    view.innerHTML = "";
+    view.appendChild(timeline.container);
+    timeline.container.id = "timeline";
+    if (timeline.scope !== folderId) {
+      timeline.scope = folderId; // entering a folder scopes the timeline
+      timeline.reset();
+    }
+    if (timeline.cards.length === 0) await timeline.loadMore();
+    timeline._virtualize();
+    return;
+  }
   view.innerHTML = "";
   view.appendChild(timeline.container);
   timeline.container.id = "timeline";
+  if (timeline.scope !== null) {
+    timeline.scope = null;
+    timeline.reset();
+  }
   if (timeline.cards.length === 0) await timeline.loadMore();
   timeline._virtualize();
 }

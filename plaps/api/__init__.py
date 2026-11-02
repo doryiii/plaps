@@ -37,7 +37,7 @@ def error_body(code: str, message: str) -> dict:
 
 def create_app(db, settings, cache, scanner, worker) -> Flask:
     """Build the app: blueprints, error handlers, and the shared collaborators."""
-    from plaps.api import media, photos, status  # imported here: they need this module
+    from plaps.api import folders, media, photos, status  # imported here: they need this module
 
     app = Flask(__name__)
     app.config["PLAPS_DB"] = db
@@ -45,8 +45,9 @@ def create_app(db, settings, cache, scanner, worker) -> Flask:
     app.config["PLAPS_CACHE"] = cache
     app.config["PLAPS_SCANNER"] = scanner
     app.config["PLAPS_WORKER"] = worker
+    app.config["PLAPS_FOLDERS"] = folders.FolderTree(db)
 
-    for blueprint in (photos.bp, media.bp, status.bp):
+    for blueprint in (photos.bp, folders.bp, media.bp, status.bp):
         app.register_blueprint(blueprint)
 
     @app.errorhandler(HTTPException)

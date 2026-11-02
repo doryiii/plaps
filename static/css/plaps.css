@@ -92,6 +92,48 @@ body {
 
 .sentinel { height: 1px; }
 
+/* folder tree */
+
+.folders { padding: 16px; max-width: 720px; }
+
+.folders details { margin-left: 0; }
+
+.folders details details { margin-left: 20px; }
+
+.folders summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+  list-style-position: inside;
+}
+
+.folders summary:hover { background: #222; }
+
+.folders .folder-meta { color: var(--muted); font-size: 12px; }
+
+.folders .folder-open {
+  margin-left: auto;
+  background: #222;
+  color: var(--fg);
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tb-link {
+  color: var(--fg);
+  text-decoration: none;
+  background: #222;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 4px 10px;
+}
+
 /* viewer */
 
 #viewer {

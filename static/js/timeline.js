@@ -13,6 +13,7 @@ const ROW_TARGET_HEIGHT = 200;
 export class Timeline {
   constructor(container = null) {
     this.container = container || document.createElement("div");
+    this.scope = null;        // folder id when the view is scoped to a subtree
     this.cards = [];          // all loaded photo cards, in fetch order
     this.cursor = null;
     this.exhausted = false;
@@ -42,7 +43,9 @@ export class Timeline {
     this.fetching = true;
     try {
       const settings = getSettings();
-      const page = await photosPage({ cursor: this.cursor, order: settings.order });
+      const page = await photosPage({
+        cursor: this.cursor, order: settings.order, folder: this.scope,
+      });
       this.cursor = page.next_cursor;
       if (!page.next_cursor) this.exhausted = true;
       this._appendCards(page.photos);
@@ -54,7 +57,9 @@ export class Timeline {
   async jumpTo(dateIso) {
     // One date-bounded request reaches the target year; no cursor paging needed.
     const settings = getSettings();
-    const page = await photosPage({ order: settings.order, before: dateIso });
+    const page = await photosPage({
+      order: settings.order, before: dateIso, folder: this.scope,
+    });
     this.reset();
     this.cursor = page.next_cursor;
     if (!page.next_cursor) this.exhausted = true;

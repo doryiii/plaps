@@ -4,7 +4,8 @@ The composite cursor (base64url of "<date_taken>|<photo_id>") is what makes
 windows stable while the scanner inserts — keyset pagination is skip-free, so
 concurrent inserts never produce skipped or repeated entries in the fetch
 stream. Optional day-inclusive date bounds let the client jump to a date in one
-request instead of hundreds of cursor pages.
+request instead of hundreds of cursor pages. The folder endpoint reuses the
+same window machinery with a subtree predicate.
 """
 
 from __future__ import annotations
@@ -55,31 +56,34 @@ def _date_bounds() -> tuple[str | None, str | None]:
     return low, high
 
 
-@bp.get("/api/photos")
-def timeline_window():
-    db = current_app.config["PLAPS_DB"]
+def parse_window_args() -> tuple[str, int] | tuple[dict, None]:
+    """Shared limit/order validation; the error variant is a JSON error body."""
     order = request.args.get("order", "desc")
     if order not in ("asc", "desc"):
-        return jsonify(error_body("bad_request", "order must be asc or desc")), 400
+        return error_body("bad_request", "order must be asc or desc"), 400
     try:
         limit = int(request.args.get("limit", DEFAULT_LIMIT))
     except ValueError:
-        return jsonify(error_body("bad_request", "limit must be an integer")), 400
+        return error_body("bad_request", "limit must be an integer"), 400
     if not 1 <= limit <= MAX_LIMIT:
-        return jsonify(error_body("bad_request", f"limit must be 1..{MAX_LIMIT}")), 400
+        return error_body("bad_request", f"limit must be 1..{MAX_LIMIT}"), 400
+    return order, limit
 
+
+def fetch_window(db, extra_clauses: list[str], extra_params: list, order: str, limit: int) -> dict:
+    """One keyset window over live photos with extra scoping predicates."""
     cursor = request.args.get("cursor")
     anchor = None
     if cursor:
         anchor = decode_cursor(cursor)
         if anchor is None:
-            return jsonify(error_body("bad_request", "malformed cursor")), 400
+            return {"error": ("bad_request", "malformed cursor")}
     low, high = _date_bounds()
     if low == "invalid" or high == "invalid":
-        return jsonify(error_body("bad_request", "after/before must be ISO dates")), 400
+        return {"error": ("bad_request", "after/before must be ISO dates")}
 
-    clauses = ["deleted_at IS NULL"]
-    params: list = []
+    clauses = ["deleted_at IS NULL", *extra_clauses]
+    params: list = list(extra_params)
     if low:
         clauses.append("date_taken >= ?")
         params.append(low)
@@ -110,4 +114,19 @@ def timeline_window():
     if len(rows) == limit:
         last = rows[-1]
         next_cursor = encode_cursor(last["date_taken"], last["photo_id"])
-    return jsonify({"photos": [photo_card(row) for row in rows], "next_cursor": next_cursor})
+    return {"photos": [photo_card(row) for row in rows], "next_cursor": next_cursor}
+
+
+@bp.get("/api/photos")
+def timeline_window():
+    db = current_app.config["PLAPS_DB"]
+    parsed = parse_window_args()
+    if isinstance(parsed, tuple) and isinstance(parsed[0], dict):
+        body, code = parsed
+        return jsonify(body), code
+    order, limit = parsed
+    result = fetch_window(db, [], [], order, limit)
+    if "error" in result:
+        code, message = result["error"]
+        return jsonify(error_body(code, message)), 400
+    return jsonify(result)

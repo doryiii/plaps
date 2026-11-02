@@ -31,12 +31,13 @@ export async function api(path) {
   return body;
 }
 
-export function photosPage({ cursor = null, order = "desc", after = null, before = null } = {}) {
+export function photosPage({ cursor = null, order = "desc", after = null, before = null, folder = null } = {}) {
   const params = new URLSearchParams({ limit: "100", order });
   if (cursor) params.set("cursor", cursor);
   if (after) params.set("after", after);
   if (before) params.set("before", before);
-  return api(`/api/photos?${params}`);
+  const path = folder ? `/api/folders/${folder}/photos` : "/api/photos";
+  return api(`${path}?${params}`);
 }
 
 export async function status() {
