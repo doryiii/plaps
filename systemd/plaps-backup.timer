@@ -1,0 +1,16 @@
+# plaps — weekly database backup trigger.
+# Install to /etc/systemd/system/plaps-backup.timer, then:
+#     systemctl daemon-reload && systemctl enable --now plaps-backup.timer
+# A timer cannot execute anything by itself; it activates plaps-backup.service.
+
+[Unit]
+Description=plaps — weekly database backup
+
+[Timer]
+OnCalendar=weekly
+# Run a missed backup after downtime instead of skipping the week
+Persistent=true
+Unit=plaps-backup.service
+
+[Install]
+WantedBy=timers.target

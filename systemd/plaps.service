@@ -1,0 +1,29 @@
+# plaps — the application service.
+# Install to /etc/systemd/system/plaps.service, then:
+#     systemctl daemon-reload && systemctl enable --now plaps
+
+[Unit]
+Description=plaps — on-disk photo gallery
+After=network.target
+
+[Service]
+Type=simple
+User=plaps
+Group=plaps
+# Absolute venv path: bare `python` would resolve the system Python, where the
+# package is not installed. The config path may also come from PLAPS_CONFIG.
+ExecStart=/opt/plaps/venv/bin/python -m plaps --config /etc/plaps/plaps.toml serve
+Restart=on-failure
+# Crash-resume makes automatic restart safe: a killed scanner resumes from its
+# checkpoint rather than corrupting state.
+
+# Hardening (the app touches only the library, its database, and its cache)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/plaps /var/cache/plaps
+ReadOnlyPaths=/mnt/photos
+
+[Install]
+WantedBy=multi-user.target

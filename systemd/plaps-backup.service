@@ -1,0 +1,14 @@
+# plaps — the unit the backup timer activates: one VACUUM INTO snapshot.
+# Install to /etc/systemd/system/plaps-backup.service (no enable needed —
+# the timer activates it).
+
+[Unit]
+Description=plaps — weekly database backup (VACUUM INTO snapshot)
+
+[Service]
+Type=oneshot
+User=plaps
+Group=plaps
+# Same absolute-venv and config-path rules as plaps.service, so the backup
+# reaches the same database the service writes.
+ExecStart=/opt/plaps/venv/bin/python -m plaps --config /etc/plaps/plaps.toml backup

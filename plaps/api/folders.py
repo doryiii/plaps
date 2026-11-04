@@ -61,32 +61,34 @@ def _serialize(node: dict, key: str) -> dict:
 
 
 class FolderTree:
-    """The memoized tree: recomputed only when the scanner commits a pass."""
+    """The memoized tree: the serialized JSON is built once and served until the
+    scanner's change stamp moves. The stamp bumps only on passes that actually
+    changed something, so the idle poll loop never invalidates it."""
 
     def __init__(self, db):
         self.db = db
         self._lock = threading.Lock()
         self._stamp = None
-        self._tree: dict | None = None
+        self._payload: bytes | None = None
 
-    def get(self) -> dict:
-        stamp = self.db.get_meta("scan_last_pass")
+    def get(self) -> bytes:
+        stamp = self.db.get_meta("scan_change")
         with self._lock:
-            if self._tree is None or stamp != self._stamp:
-                self._tree = _build_tree(self.db)
+            if self._payload is None or stamp != self._stamp:
+                self._payload = jsonify(_serialize(_build_tree(self.db), "")).get_data()
                 self._stamp = stamp
-            return self._tree
+            return self._payload
 
     def invalidate(self) -> None:
         with self._lock:
-            self._tree = None
+            self._payload = None
             self._stamp = None
 
 
 @bp.get("/api/folders")
 def folder_tree():
-    tree = current_app.config["PLAPS_FOLDERS"].get()
-    return jsonify(_serialize(tree, ""))
+    payload = current_app.config["PLAPS_FOLDERS"].get()
+    return current_app.response_class(payload, mimetype="application/json")
 
 
 @bp.get("/api/folders/<folder_id>/photos")

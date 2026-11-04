@@ -16,7 +16,7 @@ import threading
 
 import numpy as np
 
-from plaps import config
+from plaps import config, paths
 
 
 class VectorIndex:
@@ -35,6 +35,12 @@ class VectorIndex:
         self._row_of: dict[int, int] = {}
         self._size = 0
         self._masked = np.zeros(capacity, dtype=bool)
+        # filter-keyed candidate cache: (folder, after, before) ->
+        # (stamp, size, total, embedded, eligible-mask). Keyed on the scanner
+        # change stamp (library contents) and the resident size (vectors landed
+        # since the last pass), so neither an idle poll loop nor a busy embed
+        # queue churns it more than once.
+        self._candidates: dict[tuple, tuple] = {}
         self.load()
 
     # -- loading and mutation ----------------------------------------------
@@ -128,10 +134,38 @@ class VectorIndex:
 
     # -- ranking -----------------------------------------------------------
 
+    def _cached_candidates(self, folder: str | None, after: str | None, before: str | None) -> tuple:
+        """(total, embedded, eligible-row mask) for the filter, cached per
+        (change stamp, resident size).
+
+        The 150K-row fetch and the per-candidate mask build are the two most
+        expensive steps of a query at full scale; caching leaves repeat queries
+        the sgemv + top-k only. A stamp or size bump drops every entry at once
+        (bounded: at most one per distinct filter actually queried).
+        """
+        key = (folder, after, before)
+        stamp = self.db.get_meta("scan_change")
+        cached = self._candidates.get(key)
+        if cached is not None and cached[0] == stamp and cached[1] == self._size:
+            return cached[2], cached[3], cached[4]
+        ids = self._candidate_ids(folder, after, before)
+        with self._lock:
+            size = self._size
+            row_of = self._row_of
+            eligible = np.zeros(size, dtype=bool)
+            for pid in ids:
+                row = row_of.get(pid)
+                if row is not None and row < size:
+                    eligible[row] = True
+        total = len(ids)
+        embedded = int(eligible.sum())
+        if cached is not None and (cached[0] != stamp or cached[1] != size):
+            self._candidates.clear()  # stamp or size moved: every entry is stale
+        self._candidates[key] = (stamp, size, total, embedded, eligible)
+        return total, embedded, eligible
+
     def _candidate_ids(self, folder: str | None, after: str | None, before: str | None) -> list[int]:
-        """Live photos inside the filter — the coverage denominator and the
-        ranking candidate set (photos without a current-model vector are
-        silently excluded from ranking but still counted in `total`)."""
+        """Live photo ids inside the filter (the coverage denominator)."""
         clauses = ["deleted_at IS NULL"]
         params: list = []
         if after:
@@ -141,9 +175,7 @@ class VectorIndex:
             clauses.append("date_taken < ?")
             params.append(before)
         if folder is not None:
-            from plaps.paths import subtree_bounds
-
-            low, high = subtree_bounds(folder)
+            low, high = paths.subtree_bounds(folder)
             clauses += ["path >= ?", "path < ?"]
             params += [low, high]
         rows = (
@@ -169,10 +201,9 @@ class VectorIndex:
         empty result set.
         """
         query_vector = self.adapter.embed_text(text)  # one round trip
-        candidates = self._candidate_ids(folder, after, before)
-        total = len(candidates)
-        with_vectors = [pid for pid in candidates if pid in self._row_of]
-        embedded = len(with_vectors)
+        min_score = self.settings.embedding.min_score
+        min_matches = self.settings.embedding.min_matches
+        total, embedded, eligible = self._cached_candidates(folder, after, before)
         coverage = {"embedded": embedded, "total": total}
         if embedded == 0:
             return {"photos": [], "state": "empty_filter", "coverage": coverage}
@@ -184,15 +215,16 @@ class VectorIndex:
             matrix, masked = self._matrix, self._masked
         scores = matrix[:size] @ query_vector  # BLAS sgemv — no fancy-index copy
 
-        eligible = np.zeros(size, dtype=bool)
-        for pid in with_vectors:
-            eligible[self._row_of[pid]] = True
-        eligible &= ~masked[:size]
+        # fresh array: the cached eligible mask must not be mutated (a warm
+        # cache would otherwise pin a mask snapshot taken before an unmask)
+        eligible = eligible & ~masked[:size]
         rows_in_order = np.nonzero(eligible)[0]
+        # The floor/top-up loop never looks past max(limit, min_matches) rows,
+        # so a full 150K argsort buys nothing — partition, then sort the top.
+        k = min(len(rows_in_order), max(limit, min_matches))
+        top = np.argpartition(-scores[rows_in_order], k - 1)[:k]
+        rows_in_order = rows_in_order[top]
         rows_in_order = rows_in_order[np.argsort(-scores[rows_in_order], kind="stable")]
-
-        min_score = self.settings.embedding.min_score
-        min_matches = self.settings.embedding.min_matches
         ranked: list[dict] = []
         floor_reached = False
         for row in rows_in_order:  # descending score: matches first

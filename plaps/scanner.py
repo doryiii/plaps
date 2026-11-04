@@ -28,6 +28,7 @@ from plaps import config, exif, paths
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg"}
 SENTINEL_DATE = "0001-01-01T00:00:00"
+SELF_COMMIT = "SELF_COMMIT"  # op marker: the operation already committed itself
 MODES = ("rehash", "sweep", "pruned")  # precedence when more than one interval is due
 MODE_META_KEYS = {
     "rehash": "scan_rehash_run",
@@ -98,12 +99,17 @@ class Scanner:
             "scanned": 0,
         }
         self._checkpoint("phase1", stats)
-        seen, confirmed, changed = self._phase_one(mode, stats)
+        seen, walked, changed = self._phase_one(mode, stats)
         self._checkpoint("phase2", stats)
-        changed |= self._phase_two(seen, confirmed, stats)
+        changed |= self._phase_two(seen, walked, stats)
         self.record_baseline()
         self.db.set_meta("scan_stats", json.dumps(stats))
         self.db.set_meta("scan_last_pass", str(now()))
+        if changed:
+            # The change stamp read-derivations (folder tree, search candidate
+            # sets) memoize on: bumped only when a pass actually changed
+            # something, so an idle poll loop never churns their caches.
+            self.db.set_meta("scan_change", str(int(self.db.get_meta("scan_change", "0") or 0) + 1))
         return changed
 
     def _checkpoint(self, phase: str, stats: dict) -> None:
@@ -114,43 +120,45 @@ class Scanner:
     # -- phase one ---------------------------------------------------------
 
     def _phase_one(self, mode: str, stats: dict) -> tuple[set, set, bool]:
-        """Walk the library. Returns (seen paths, confirmed dirs, changed).
+        """Walk the library. Returns (seen paths, walked dirs, changed).
 
-        `confirmed` holds every directory known present this pass — walked or
-        pruned-unchanged. Phase two vanish checks apply only to photos whose
-        directory was walked (or no longer exists); pruned directories are
-        assumed intact.
+        `walked` holds only the directories actually scanned this pass (root
+        included); unchanged-mtime directories pruned from the walk are tracked
+        separately as intact and never feed the phase-two vanish check — their
+        files were not stat-ed, so absence from `seen` means nothing there.
         """
         root = self.settings.library_root
         seen: set[str] = set()
-        confirmed: set[str] = set()
+        walked: set[str] = set()
+        intact: set[str] = set()
         changed = False
         if not (root.is_dir() and os.access(root, os.R_OK | os.X_OK)):
             # An unstat-able root is a guard condition, not a mass vanish:
             # halt the pass without touching any record.
             self._trip_guard("library root is not readable", 0)
-            return seen, confirmed, False
+            return seen, walked, False
 
         dir_mtimes = self._load_dirs()
-        for dirpath in self._walk_dirs(root, mode, dir_mtimes, confirmed):
+        for dirpath in self._walk_dirs(root, mode, dir_mtimes, walked, intact):
             rel_dir = paths.relative_to_library(root, dirpath)
-            confirmed.add(rel_dir)  # walked this pass: present, and its files are seen
+            walked.add(rel_dir)  # scanned this pass: its files are in `seen`
             changed |= self._scan_dir(dirpath, rel_dir, mode, seen, stats)
             mtime_ns = dirpath.stat().st_mtime_ns
             dir_mtimes[rel_dir] = mtime_ns
             self._record_dir(rel_dir, mtime_ns)  # recorded only after its files
             self._checkpoint("phase1", stats)
-        self._drop_vanished_dirs(confirmed)
-        return seen, confirmed, changed
+        self._drop_vanished_dirs(walked | intact)
+        return seen, walked, changed
 
     def _load_dirs(self) -> dict[str, int]:
         rows = self.db.reader().execute("SELECT path, mtime FROM dirs").fetchall()
         return {row["path"]: row["mtime"] for row in rows}
 
-    def _walk_dirs(self, root: Path, mode: str, dir_mtimes: dict[str, int], confirmed: set):
+    def _walk_dirs(self, root: Path, mode: str, dir_mtimes: dict[str, int], walked: set, intact: set):
         """Yield directories to walk; unchanged-mtime dirs are pruned, not yielded,
-        but still land in `confirmed` (assumed intact)."""
-        confirmed.add("")
+        and land in `intact` — they are assumed present but their files are not
+        vanish-checked this pass."""
+        walked.add("")
         yield root
         stack = [root]
         while stack:
@@ -169,7 +177,7 @@ class Scanner:
                 except OSError:
                     unchanged = False
                 if unchanged:
-                    confirmed.add(rel)  # intact: its files are neither stat-ed nor vanish-checked
+                    intact.add(rel)  # intact: its files are neither stat-ed nor vanish-checked
                     continue
                 yield child
                 stack.append(child)
@@ -197,8 +205,11 @@ class Scanner:
             stats["scanned"] += 1
             op = self._process_file(root / rel_path, rel_path, stat, mode, seen, stats)
             if op is not None:
-                ops.append(op)
-                changed = True
+                if op[0] == SELF_COMMIT:  # committed inside (revival, replace)
+                    changed = True
+                else:
+                    ops.append(op)
+                    changed = True
         if ops:
             with self.db.writer() as conn:
                 conn.execute("BEGIN")
@@ -251,7 +262,7 @@ class Scanner:
                     (stat.st_size, stat.st_mtime_ns, exif_err, row["photo_id"]),
                 )
             self._replace(row, content_hash, stat, date_taken, date_source, width, height, stats)
-            return None
+            return (SELF_COMMIT, ())
         return self._disposition_new(
             rel_path,
             content_hash,
@@ -313,7 +324,7 @@ class Scanner:
                 self._enqueue_jobs(conn, tombstone["photo_id"])
             self._mask_index(tombstone["photo_id"], unmask=True)
             stats["revived"] += 1
-            return None
+            return (SELF_COMMIT, ())
         live_twin = reader.execute(
             "SELECT 1 FROM photos WHERE content_hash=? AND deleted_at IS NULL LIMIT 1",
             (content_hash,),
@@ -413,13 +424,13 @@ class Scanner:
 
     # -- phase two ---------------------------------------------------------
 
-    def _phase_two(self, seen: set, confirmed: set, stats: dict) -> bool:
+    def _phase_two(self, seen: set, walked: set, stats: dict) -> bool:
         reader = self.db.reader()
         live = reader.execute("SELECT * FROM photos WHERE deleted_at IS NULL").fetchall()
         candidates = [
             row
             for row in live
-            if row["path"] not in seen and self._dir_walked_or_gone(row["path"], confirmed)
+            if row["path"] not in seen and self._dir_walked_or_gone(row["path"], walked)
         ]
         changed = bool(candidates)
         self._resolve_vanishes(candidates, stats)
@@ -427,11 +438,13 @@ class Scanner:
         self._purge_expired(stats)
         return changed
 
-    def _dir_walked_or_gone(self, photo_path: str, confirmed: set) -> bool:
+    def _dir_walked_or_gone(self, photo_path: str, walked: set) -> bool:
         rel_dir = photo_path.rpartition("/")[0]
-        if rel_dir in confirmed:
+        if rel_dir in walked:
             return True
-        return not (self.settings.library_root / rel_dir).is_dir()  # walked-and-gone
+        # A directory not walked this pass: still on disk (pruned as intact, or
+        # a new sibling) — its photos are assumed present, never vanish-checked.
+        return not (self.settings.library_root / rel_dir).is_dir()
 
     def _resolve_vanishes(self, candidates: list, stats: dict) -> None:
         if not candidates:
