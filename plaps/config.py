@@ -56,6 +56,12 @@ class ScannerSettings:
 
 
 @dataclass(frozen=True)
+class ServerSettings:
+    host: str
+    port: int
+
+
+@dataclass(frozen=True)
 class Settings:
     library_root: Path
     database_path: Path
@@ -65,6 +71,7 @@ class Settings:
     embedding: EmbeddingSettings
     scanner: ScannerSettings
     purge_after_days: int
+    server: ServerSettings
 
 
 def config_path(explicit: str | Path | None = None) -> Path:
@@ -104,6 +111,21 @@ def _validate_url(value: object) -> str:
     if scheme not in ("http", "https"):
         raise ConfigError("embedding.base_url scheme must be http or https")
     return value
+
+
+def _validate_listen(value: object) -> tuple[str, int]:
+    """`server.listen` = "host:port". The default stays loopback-only: exposing
+    the app beyond localhost is lighttpd's job (TLS + digest auth)."""
+    if not isinstance(value, str) or value.count(":") != 1:
+        raise ConfigError('server.listen must be "host:port" (e.g. "127.0.0.1:8096")')
+    host, _, raw_port = value.rpartition(":")
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ConfigError(f'server.listen port must be an integer, got "{raw_port}"') from exc
+    if not 1 <= port <= 65_535:
+        raise ConfigError(f"server.listen port must be 1..65535, got {port}")
+    return host, port
 
 
 def _validate_timezone(value: object) -> ZoneInfo:
@@ -162,6 +184,7 @@ def load_config(path: str | Path | None = None) -> Settings:
     purge_days = _validate_int(
         _optional(data, "tombstone.purge_after_days", 30), "tombstone.purge_after_days", 1
     )
+    host, port = _validate_listen(_optional(data, "server.listen", "127.0.0.1:8096"))
 
     return Settings(
         library_root=library_root.resolve(),
@@ -182,6 +205,7 @@ def load_config(path: str | Path | None = None) -> Settings:
             guard_threshold=float(guard),
         ),
         purge_after_days=purge_days,
+        server=ServerSettings(host=host, port=port),
     )
 
 

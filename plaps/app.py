@@ -2,8 +2,8 @@
 model is visible in a single place.
 
 Wires config → db → adapter → vector index (loaded before serving) → scanner +
-worker → Flask app → waitress. The app listens on 127.0.0.1:8096 — constants
-matching the lighttpd sample, not config. Model-change detection happens here
+worker → Flask app → waitress. The app listens on the configured `server.listen`
+(default 127.0.0.1:8096, matching the lighttpd sample). Model-change detection happens here
 at startup, the single owner: a configured ``embedding.model_id`` differing from
 ``meta.active_model_id`` queues re-embed jobs for every photo lacking a vector
 for the configured model, and stale pending embed jobs (an aborted change) are
@@ -29,9 +29,7 @@ from plaps.worker import Worker
 
 log = logging.getLogger("plaps")
 
-HOST = "127.0.0.1"
-PORT = 8096
-THREADS = 16
+THREADS = 16  # pinned, not config: one writer + per-thread readers sized for a single user
 
 
 def startup_model_check(db, settings) -> None:
@@ -133,5 +131,6 @@ def serve(settings: config.Settings, adapter: EmbeddingAdapter | None = None) ->
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
-    log.info("plaps serving on http://%s:%d", HOST, PORT)
-    waitress_serve(plaps.app, host=HOST, port=PORT, threads=THREADS)
+    host, port = settings.server.host, settings.server.port
+    log.info("plaps serving on http://%s:%d", host, port)
+    waitress_serve(plaps.app, host=host, port=port, threads=THREADS)

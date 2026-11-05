@@ -20,7 +20,26 @@ def test_defaults_applied(tmp_path, library):
     assert settings.scanner.rehash_interval == 30 * 86_400
     assert settings.scanner.guard_threshold == 10
     assert settings.purge_after_days == 30
+    assert settings.server.host == "127.0.0.1"
+    assert settings.server.port == 8096
     assert settings.timezone.key == "Europe/Berlin"
+
+
+@pytest.mark.parametrize(
+    "listen",
+    ["127.0.0.1", "127.0.0.1:8096:extra", "localhost:http", "1.2.3.4:0", "1.2.3.4:70000"],
+)
+def test_listen_validation(tmp_path, library, listen):
+    library.root.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(config.ConfigError):
+        make_config(tmp_path, library.root, **{"server.listen": listen})
+
+
+def test_listen_override(tmp_path, library):
+    library.root.mkdir(parents=True, exist_ok=True)
+    settings = make_config(tmp_path, library.root, **{"server.listen": "127.0.0.1:9000"})
+    assert settings.server.host == "127.0.0.1"
+    assert settings.server.port == 9000
 
 
 def test_backup_dir_defaults_beside_database(tmp_path, library):

@@ -86,6 +86,10 @@ model_id = "gemma-embedding"      # must match what the endpoint serves
 # guard_threshold      = 10        # % of live photos; > that vanishing halts
                                   # tombstoning until resumed (0 disables)
 
+# [server]
+# listen = "127.0.0.1:8096"        # host:port; keep it loopback — TLS and
+                                  # auth are lighttpd's job
+
 # [tombstone]
 # purge_after_days     = 30        # deleted photos purge after this
 ```
