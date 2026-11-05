@@ -8,6 +8,8 @@ definition are part of it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
@@ -39,7 +41,15 @@ def create_app(db, settings, cache, scanner, worker, adapter, index) -> Flask:
     """Build the app: blueprints, error handlers, and the shared collaborators."""
     from plaps.api import folders, media, photos, search, status  # imported here: they need this module
 
-    app = Flask(__name__)
+    # The UI: lighttpd serves static/ directly from disk in production; Flask
+    # serves the same files here so the app stands alone in dev. index.html
+    # references /css and /js with root-absolute paths, matching the lighttpd
+    # docroot, so the static mount is at the URL root — never Flask's /static
+    # default. The static route's path converter never shadows /api, /media,
+    # or /original: those are registered as literal rules, which Werkzeug
+    # matches before any converter rule.
+    static_root = Path(__file__).resolve().parents[2] / "static"
+    app = Flask(__name__, static_folder=str(static_root), static_url_path="")
     app.config["PLAPS_DB"] = db
     app.config["PLAPS_SETTINGS"] = settings
     app.config["PLAPS_CACHE"] = cache
@@ -48,6 +58,7 @@ def create_app(db, settings, cache, scanner, worker, adapter, index) -> Flask:
     app.config["PLAPS_ADAPTER"] = adapter
     app.config["PLAPS_INDEX"] = index
     app.config["PLAPS_FOLDERS"] = folders.FolderTree(db)
+    app.add_url_rule("/", endpoint="index", view_func=lambda: app.send_static_file("index.html"))
 
     for blueprint in (photos.bp, folders.bp, media.bp, search.bp, status.bp):
         app.register_blueprint(blueprint)
