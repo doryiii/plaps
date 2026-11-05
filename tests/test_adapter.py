@@ -70,11 +70,13 @@ def test_image_payload_nests_parts_inside_content():
     assert all("type" not in item or "content" in item for item in sent["input"])
 
 
-def test_text_payload_is_a_plain_string():
+def test_text_query_carries_the_search_instruction():
+    """The query side of EmbeddingGemma's asymmetric search task: the model
+    card's instruction must prefix the raw query (image docs need none)."""
     endpoint = MockEndpoint()
     make_adapter(endpoint).embed_text("a dog on the beach")
     sent = json.loads(endpoint.requests[-1].read())
-    assert sent == {"input": "a dog on the beach"}
+    assert sent == {"input": "task: search result | query: a dog on the beach"}
 
 
 def test_defensive_normalization_of_unnormalized_responses():
